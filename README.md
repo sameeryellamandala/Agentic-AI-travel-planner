@@ -1,44 +1,103 @@
-# 🌍 VoyageAI: Smart AI Travel Planner
+# ✈️ AI Travel Planner
 
-VoyageAI is an intelligent, agentic travel planning application built using **LangGraph**, **Groq**, and **Streamlit**. It takes your travel preferences—like budget, interests, and duration—and orchestrates multiple AI nodes to negotiate the best routes, accommodations, and activities, culminating in a comprehensive master itinerary.
+An **Agentic AI-powered travel planning system** that creates personalized travel itineraries by combining **LLM reasoning, real-time travel APIs, user preferences, budget constraints, and deterministic fallback estimation**.
 
-## ✨ Features
-- **Dynamic Transport Options:** Automatically fetches flight, train, or bus options based on user preference.
-- **Smart Budget Estimation:** Analyzes suggested transport and hotel prices to calculate a realistic total trip cost.
-- **Agentic Workflow:** Utilizes LangGraph to break down the planning process into specialized, sequential AI tasks.
-- **Beautiful UI:** A premium, dark-mode friendly Streamlit dashboard with tabs and metric cards.
+The system uses **LangGraph** to orchestrate specialized tools for flights, hotels, weather, and transportation, while **Groq LLM** performs reasoning, ranking, constraint handling, and dynamic replanning.
 
 ---
 
-## 🏗️ Architecture & Node Flow (UML Diagram)
+## 🚀 Features
 
-The application uses **LangGraph** to manage the state of the travel plan. The workflow starts by collecting preferences and sequentially passes the state through various specialized nodes until the final plan is generated.
+- 🤖 **Agentic AI Travel Planning**
+  - Understands natural-language travel requirements.
+  - Automatically selects and invokes appropriate tools.
+  - Generates personalized day-by-day itineraries.
+
+- ✈️ **Real-Time Flight Search**
+  - Uses **Ignav API** for flight offers and pricing.
+  - Supports date-specific flight search where available.
+
+- 🏨 **Real-Time Hotel Search**
+  - Uses **StayingAPI** for hotel availability and pricing.
+  - Supports user preferences such as:
+    - 3-Star
+    - 4-Star
+    - 5-Star
+  - Falls back to estimated hotel pricing when live data is unavailable.
+
+- 🌦️ **Weather-Aware Planning**
+  - Uses **OpenWeather API**.
+  - Adjusts itinerary recommendations according to weather conditions.
+
+- 🚆 **Train Cost Estimation**
+  - No unreliable/free train API dependency.
+  - Estimates train costs using distance and configurable fare rates.
+
+- 🚌 **Bus Cost Estimation**
+  - Estimates bus fares using route distance and configurable transport rates.
+
+- 💰 **Budget-Aware Planning**
+  - Calculates the complete estimated trip cost.
+  - Compares the plan against the user's budget.
+
+- 🔄 **Dynamic Replanning**
+  - If the initial plan exceeds the budget, the agent searches for alternatives and replans the trip.
+
+- 🔎 **Live vs Estimated Data Transparency**
+  - Clearly distinguishes between:
+    - `LIVE`
+    - `ESTIMATED`
+    - `UNAVAILABLE`
+
+- 🔐 **Secure API Key Management**
+  - API credentials are stored using environment variables.
+  - Secrets are never hardcoded into the application.
+
+---
+
+# 🏗️ System Architecture
 
 ```mermaid
-graph TD
-    %% Define Styles
-    classDef startEnd fill:#2563EB,stroke:#1D4ED8,stroke-width:2px,color:#fff,font-weight:bold;
-    classDef node fill:#1F2937,stroke:#374151,stroke-width:2px,color:#60A5FA,font-weight:bold;
+flowchart TD
 
-    %% Nodes
-    START((START)):::startEnd
-    N1[Collect Preferences]:::node
-    N2[Find Places]:::node
-    N3[Find Hotels]:::node
-    N4[Find Transport]:::node
-    N5[Food Recommendations]:::node
-    N6[Generate Itinerary]:::node
-    N7[Calculate Budget]:::node
-    N8[Final Response]:::node
-    END((END)):::startEnd
+    A[👤 User] --> B[🧠 LangGraph Travel Agent]
 
-    %% Edges
-    START --> N1
-    N1 --> N2
-    N2 --> N3
-    N3 --> N4
-    N4 --> N5
-    N5 --> N6
-    N6 --> N7
-    N7 --> N8
-    N8 --> END
+    B --> C[Requirement Analysis]
+
+    C --> D1[✈️ Flight Tool]
+    C --> D2[🏨 Hotel Tool]
+    C --> D3[🌦️ Weather Tool]
+    C --> D4[🚆 Train Estimator]
+    C --> D5[🚌 Bus Estimator]
+
+    D1 --> E1[Ignav API]
+    D2 --> E2[StayingAPI]
+    D3 --> E3[OpenWeather API]
+
+    D4 --> F1[Distance Calculation]
+    D5 --> F1
+
+    F1 --> F2[Deterministic Fare Estimator]
+
+    E1 --> G[🔄 Data Normalization]
+    E2 --> G
+    E3 --> G
+    F2 --> G
+
+    G --> H[🎯 Preference Filtering]
+
+    H --> I[📊 Option Ranking]
+
+    I --> J[💰 Budget Calculation]
+
+    J --> K{Within Budget?}
+
+    K -->|Yes| L[📝 Generate Itinerary]
+
+    K -->|No| M[🔄 Dynamic Replanning]
+
+    M --> H
+
+    L --> N[🤖 Groq LLM]
+
+    N --> O[🌍 Final Personalized Itinerary]
