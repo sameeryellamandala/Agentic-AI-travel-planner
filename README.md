@@ -55,6 +55,8 @@ The system uses **LangGraph** to orchestrate specialized tools for flights, hote
 
 ---
 
+VIDEO : https://drive.google.com/file/d/1JXfvt-NQGQEF81krzacxfsSk-pI3MZzZ/view?usp=drive_link
+
 # 🏗️ System Architecture
 
 ```mermaid
