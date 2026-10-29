@@ -24,18 +24,18 @@ Use Python 3.10–3.13 and Node.js 20.19+ or 22.12+.
 
 ```powershell
 python -m venv .venv
-.venv/Scripts/python -m pip install -r requirements.txt
-Copy-Item .env.example .env
+.venv/Scripts/python -m pip install -r backend/requirements.txt
+Copy-Item backend/.env.example backend/.env
 ```
 
-Fill in `.env` locally. `GROQ_API_KEY` is required for agents. Configure `GROQ_MODEL` with a tool-capable model available to your account. Weather, flights, and hotels use `OPENWEATHER_API_KEY`, `IGNAV_API_KEY`, and `MAKCORPS_API_KEY`. Wikipedia does not require a key. `PEXELS_API_KEY` is optional and provides the inspiration photo; otherwise an illustrated landscape appears.
+Fill in `backend/.env` locally. `GROQ_API_KEY` is required for agents. Configure `GROQ_MODEL` with a tool-capable model available to your account. Weather, flights, and hotels use `OPENWEATHER_API_KEY`, `IGNAV_API_KEY`, and `MAKCORPS_API_KEY`. Wikipedia does not require a key. `PEXELS_API_KEY` is optional and provides the inspiration photo; otherwise an illustrated landscape appears.
 
-Do not overwrite an existing `.env` when updating the project. Credentials stay on the backend and `.env` is ignored by Git.
+Do not overwrite an existing `backend/.env` when updating the project. Credentials stay on the backend and `backend/.env` is ignored by Git.
 
 Start the backend:
 
 ```powershell
-.venv/Scripts/python -m uvicorn api:app --host 127.0.0.1 --port 8080
+.venv/Scripts/python -m uvicorn --app-dir backend api:app --host 127.0.0.1 --port 8080
 ```
 
 In another terminal:
@@ -73,16 +73,27 @@ The React screen shows real completed-step updates, review and revision activity
 ## Project layout
 
 ```text
-graph.py             Workflow and revision routing
-agents/              CrewAI roles and tasks
-mcp_tools/           Request-scoped stdio MCP server and managed client
-schemas/             Request, itinerary, research, review, and response models
-services/            External provider integrations
-tools/estimators.py  Train fare estimates and distance utilities
-utils/               Trip context and deterministic budget arithmetic
-api.py               FastAPI endpoints and progress stream
-frontend/            React interface
-tests/               Workflow, MCP, provider, and API checks
+backend/
+  agents/              CrewAI roles and tasks
+  mcp_tools/           MCP server and client
+  schemas/             Request and response models
+  services/            Weather, hotels, flights, and Wikipedia
+  tools/               Train fare estimates
+  utils/               Trip context, validation, and budget logic
+  config/              Fare configuration
+  tests/               Backend tests
+  api.py               FastAPI endpoints
+  graph.py             LangGraph workflow
+  requirements.txt     Python dependencies
+  pytest.ini           Test configuration
+  .env.example         Blank API key template
+frontend/
+  src/                 React screens and styles
+  public/              Public assets
+  package.json         Frontend dependencies and commands
+docs/                  Implementation plan, verification, and previews
+README.md              Setup instructions
+.gitignore             Local files excluded from Git
 ```
 
 The duplicate Streamlit UI and direct LangChain/Groq orchestration were removed. LangGraph still installs its own LangChain Core dependency.
@@ -90,7 +101,7 @@ The duplicate Streamlit UI and direct LangChain/Groq orchestration were removed.
 ## Checks
 
 ```powershell
-.venv/Scripts/python -m pytest
+.venv/Scripts/python -m pytest backend
 .venv/Scripts/python -m pip check
 cd frontend
 npm run build
@@ -98,6 +109,6 @@ npm run lint
 npm audit
 ```
 
-Live provider tests are opt-in: set `RUN_LIVE_TESTS=1` and run `pytest -m integration`. They consume provider requests and require working credentials.
+Live provider tests are opt-in: set `RUN_LIVE_TESTS=1` and run `.venv/Scripts/python -m pytest backend -m integration`. They consume provider requests and require working credentials.
 
 Provider references: [CrewAI tasks](https://docs.crewai.com/en/concepts/tasks), [MCP stdio](https://modelcontextprotocol.io/docs/develop/build-server), [Makcorps documentation](https://www.makcorps.com/documentation/).

@@ -197,3 +197,7 @@ The user can click Start Planning and receive a researched itinerary produced by
 - Writing runs one day per CrewAI task, excluding already-used attractions and preferring different foods. LangGraph still controls the whole trip and review loop.
 - Missing provider prices are informational. The planning budget uses editable food, activity, and accommodation allowances, separately labelled from live prices and configured train fares.
 - When model wording fails or references cannot be verified, a labelled guide can be built from the verified source pool. A missing AI review is never represented as approval.
+
+## Folder organization
+
+Python application code, configuration, dependencies, tests, and the local `.env` now live in `backend/`. React stays in `frontend/`. Planning documents and screenshots live in `docs/`. Run backend commands from the project root using `--app-dir backend`, or from inside `backend/`.
