@@ -1,295 +1,294 @@
-import os
-import requests
-import logging
-from typing import Dict, Any, List, Optional
+"""Destination-anchored Wikipedia evidence, not unchecked search snippets."""
 
-logger = logging.getLogger(__name__)
+import math
+import os
+import re
+from functools import lru_cache
+from urllib.parse import quote
+import requests
 
 WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
-DEFAULT_HEADERS = {
-    "User-Agent": os.getenv("WIKIPEDIA_USER_AGENT", "TravelPlanner/2.0")
-}
+PLACE = re.compile(
+    r"\b(beach|fort|temple|church|basilica|cathedral|museum|palace|garden|park|sanctuary|waterfall|falls|lake|island|monastery|mosque|market|bridge|memorial|monument|castle|ruins|lighthouse|aquarium)\b",
+    re.I,
+)
+FOOD = re.compile(
+    r"\b(dish|curry|sausage|dessert|sweet|bread|stew|drink|beverage|spirit|confection|pickle|snack|cake|pudding|dumpling|noodle|pastry|soup|rice dish|seafood dish)\b",
+    re.I,
+)
+NON_VISIT = re.compile(
+    r"^(?:list of|tourism|history of|economy of|culture of|cuisine of)|\b(?:disambiguation)\b",
+    re.I,
+)
+MEDIA_PERSON = re.compile(
+    r"\b(?:film|musician|actor|actress|politician|album|television series|novel|singer|disc jockey)\b",
+    re.I,
+)
 
-def _fetch_wikipedia_extracts(titles: List[str], timeout: int = 8) -> Dict[str, Dict[str, str]]:
-    """
-    Given a list of Wikipedia page titles, queries MediaWiki API for canonical URLs and plain-text extracts.
-    """
+
+def _request(**params):
+    response = requests.get(
+        WIKIPEDIA_API_URL,
+        params={"action": "query", "format": "json", "redirects": 1, **params},
+        headers={
+            "User-Agent": os.getenv("WIKIPEDIA_USER_AGENT", "VoyageTravelPlanner/3.0")
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
+    body = response.json()
+    if "error" in body:
+        raise ValueError("Wikipedia request rejected")
+    return body
+
+
+def _pages(body):
+    return [
+        page
+        for page in body.get("query", {}).get("pages", {}).values()
+        if "missing" not in page
+    ]
+
+
+@lru_cache(maxsize=64)
+def destination_page(location):
+    pages = _pages(
+        _request(
+            titles=location,
+            prop="extracts|info|coordinates|links|pageprops",
+            inprop="url",
+            exintro=1,
+            explaintext=1,
+            plnamespace=0,
+            pllimit=500,
+        )
+    )
+    if not pages or "disambiguation" in pages[0].get("pageprops", {}):
+        raise ValueError(
+            "Destination is unavailable or ambiguous; include a region/country"
+        )
+    return pages[0]
+
+
+def _fetch_wikipedia_extracts(titles):
     if not titles:
         return {}
+    pages = []
+    for offset in range(0, min(len(titles), 100), 50):
+        body = _request(
+            titles="|".join(titles[offset : offset + 50]),
+            prop="extracts|info|coordinates|pageprops",
+            inprop="url",
+            exintro=1,
+            explaintext=1,
+            exsentences=4,
+        )
+        for page in _pages(body):
+            page["requested_titles"] = [page["title"]] + [
+                row["from"]
+                for row in body.get("query", {}).get("redirects", [])
+                if row["to"] == page["title"]
+            ]
+            pages.append(page)
+    return {page["title"].casefold(): page for page in pages}
 
-    params = {
-        "action": "query",
-        "prop": "extracts|info",
-        "inprop": "url",
-        "exintro": 1,
-        "explaintext": 1,
-        "exsentences": 3,
-        "titles": "|".join(titles),
-        "format": "json",
-        "utf8": 1
-    }
 
+def _nearby(page, destination):
+    a, b = page.get("coordinates", []), destination.get("coordinates", [])
+    if not a or not b:
+        return False
+    lat1, lat2 = math.radians(a[0]["lat"]), math.radians(b[0]["lat"])
+    dlat = lat2 - lat1
+    dlon = math.radians(b[0]["lon"] - a[0]["lon"])
+    hav = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    )
+    return 6371 * 2 * math.asin(min(1, math.sqrt(hav))) <= 120
+
+
+def _mentions_destination(text, destination):
+    name = destination["title"].split(",")[0].split("(")[0].strip()
+    return bool(re.search(r"\b" + re.escape(name) + r"(?:n|an|ian)?\b", text, re.I))
+
+
+def relevant_article(page, destination, category, cuisine_linked=False):
+    title = page.get("title", "")
+    extract = " ".join(page.get("extract", "").split())
+    intro = extract[:450]
+    if not extract or "disambiguation" in page.get("pageprops", {}):
+        return False
+    if NON_VISIT.search(title) or MEDIA_PERSON.search(intro[:220]):
+        return False
+    if category == "places":
+        return bool(PLACE.search(title + " " + intro)) and (
+            _mentions_destination(intro, destination) or _nearby(page, destination)
+        )
+    if "cuisine" in title.casefold():
+        return False
+    if title.casefold() in {
+        "bread",
+        "rice",
+        "food",
+        "meat",
+        "fish",
+        "seafood",
+        "curry",
+        "cake",
+        "dessert",
+        "soup",
+        "drink",
+        "vegetable",
+        "spice",
+        "pork",
+        "beef",
+    }:
+        return False
+    return bool(
+        FOOD.search(
+            title
+            + " "
+            + intro
+            + " "
+            + page.get("pageprops", {}).get("wikibase-shortdesc", "")
+        )
+    ) and (cuisine_linked or _mentions_destination(intro, destination))
+
+
+def _search_titles(location, category):
+    terms = (
+        "(beach OR fort OR temple OR museum OR palace OR cathedral OR park OR waterfall)"
+        if category == "places"
+        else "(dish OR cuisine OR curry OR dessert OR drink)"
+    )
+    # The destination remains mandatory regardless of the agent's free-text query.
+    body = _request(
+        list="search", srsearch=f'"{location}" {terms}', srlimit=30, srnamespace=0
+    )
+    return [item["title"] for item in body.get("query", {}).get("search", [])]
+
+
+def _collect(location, category, limit):
+    field = "places" if category == "places" else "food_items"
+    base = {"source": "Wikipedia", "location": location, field: []}
     try:
-        response = requests.get(WIKIPEDIA_API_URL, params=params, headers=DEFAULT_HEADERS, timeout=timeout)
-        if response.status_code != 200:
-            logger.warning(f"Wikipedia extracts returned HTTP {response.status_code}")
-            return {}
-
-        data = response.json()
-        pages = data.get("query", {}).get("pages", {})
-        results = {}
-        for page_id, page_info in pages.items():
-            if page_id == "-1":
+        root = destination_page(location.strip())
+        links = [item["title"] for item in root.get("links", [])]
+        cuisine_links = set()
+        menu_names = []
+        if category == "food":
+            cuisines = [title for title in links if "cuisine" in title.casefold()]
+            for title in cuisines[:1]:
+                cuisine_pages = _pages(
+                    _request(
+                        titles=title,
+                        prop="extracts|links",
+                        explaintext=1,
+                        plnamespace=0,
+                        pllimit=500,
+                    )
+                )
+                if not cuisine_pages:
+                    continue
+                cuisine = cuisine_pages[0]
+                body = cuisine.get("extract", "").casefold()
+                # Ignore navigation-template links to cuisines around the world.
+                cuisine_links.update(
+                    item["title"]
+                    for item in cuisine.get("links", [])
+                    if "cuisine" not in item["title"].casefold()
+                    and item["title"].split(" (")[0].casefold() in body
+                )
+                for line in cuisine.get("extract", "").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("="):
+                        continue
+                    name = re.split(r"\s[–—]\s", line, maxsplit=1)[0]
+                    name = re.sub(r"\([^)]*\)", "", name).strip()
+                    if (
+                        2 <= len(name) <= 65
+                        and not any(char in name for char in ":;.")
+                        and "cuisine" not in name.casefold()
+                    ):
+                        cuisine_links.add(name)
+                        menu_names.append(name)
+            candidates = menu_names + sorted(cuisine_links)
+            # Search helps destinations whose primary article does not link a cuisine page.
+            if not candidates:
+                candidates = _search_titles(root["title"], category)
+        else:
+            candidates = [
+                title
+                for title in links
+                if PLACE.search(title) and not NON_VISIT.search(title)
+            ]
+            if len(candidates) < limit:
+                candidates += _search_titles(root["title"], category)
+        candidates = list(dict.fromkeys(candidates))[
+            : 100 if category == "food" else 50
+        ]
+        pages = _fetch_wikipedia_extracts(candidates)
+        accepted = []
+        for page in pages.values():
+            linked = any(
+                title in cuisine_links
+                for title in page.get("requested_titles", [page["title"]])
+            )
+            if not relevant_article(page, root, category, linked):
                 continue
-            title = page_info.get("title", "")
-            extract = page_info.get("extract", "").strip()
-            url = page_info.get("fullurl", f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}")
-            if title:
-                # Clean multiple newlines and keep extract concise
-                clean_extract = " ".join(extract.split())
-                results[title.lower()] = {
-                    "title": title,
-                    "extract": clean_extract[:400] + ("..." if len(clean_extract) > 400 else "") if clean_extract else "",
-                    "url": url,
-                    "source": "Wikipedia"
+            description = " ".join(page["extract"].split())
+            accepted.append(
+                {
+                    "name": page["title"],
+                    "description": description[:1000],
+                    "url": page.get("fullurl")
+                    or "https://en.wikipedia.org/wiki/"
+                    + quote(page["title"].replace(" ", "_")),
+                    "source": "Wikipedia",
+                    "category": "Attraction" if category == "places" else "Local dish",
+                    "estimated_cost": None,
+                    "relevance_verified": True,
+                    "destination": location,
+                    "destination_source": root.get("fullurl")
+                    or "https://en.wikipedia.org/wiki/" + quote(root["title"]),
+                    "coordinates": page.get("coordinates", []),
                 }
-        return results
-    except Exception as exc:
-        logger.error(f"Error fetching Wikipedia page extracts: {exc}")
-        return {}
-
-
-def search_wikipedia_places(
-    location: str,
-    query: Optional[str] = None,
-    interests: Optional[List[str]] = None,
-    limit: int = 4
-) -> Dict[str, Any]:
-    """
-    Searches Wikipedia/MediaWiki for factual notable places and attractions in a destination.
-    Returns factual page title, concise extract, and canonical URL.
-    Does NOT fabricate opening hours or prices.
-    """
-    clean_loc = location.strip()
-    if not clean_loc:
+            )
+        # Wikipedia returns pages by page ID; use a stable order for repeatable selection.
+        accepted.sort(
+            key=lambda item: (
+                not _mentions_destination(item["description"], root),
+                item["name"].casefold(),
+            )
+        )
+        accepted = accepted[:limit]
         return {
+            **base,
+            field: accepted,
+            "success": bool(accepted),
+            "status": "SUCCESS" if accepted else "UNAVAILABLE",
+            "source_type": "LIVE_PROVIDER" if accepted else "UNAVAILABLE",
+            **(
+                {}
+                if accepted
+                else {
+                    "reason": "No destination-relevant attractions or dishes could be verified"
+                }
+            ),
+        }
+    except (requests.RequestException, ValueError, KeyError, TypeError):
+        return {
+            **base,
+            "success": False,
             "status": "UNAVAILABLE",
-            "source": "Wikipedia",
             "source_type": "UNAVAILABLE",
-            "location": location,
-            "places": [],
-            "reason": "No location provided for places search"
-        }
-
-    # Build search query
-    subquery = query.strip() if query else ""
-    if not subquery and interests:
-        subquery = " ".join(interests[:2])
-    
-    search_term = subquery if clean_loc.lower() in subquery.lower() else f"{clean_loc} {subquery}".strip()
-    if not subquery:
-        search_term = f"Tourist attractions in {clean_loc}"
-
-    params = {
-        "action": "query",
-        "list": "search",
-        "srsearch": search_term,
-        "srlimit": max(limit, 4),
-        "format": "json",
-        "utf8": 1
-    }
-
-    try:
-        response = requests.get(WIKIPEDIA_API_URL, params=params, headers=DEFAULT_HEADERS, timeout=8)
-        if response.status_code != 200:
-            return {
-                "status": "UNAVAILABLE",
-                "source": "Wikipedia",
-                "source_type": "UNAVAILABLE",
-                "location": location,
-                "places": [],
-                "reason": f"MediaWiki returned HTTP {response.status_code}"
-            }
-
-        data = response.json()
-        search_items = data.get("query", {}).get("search", [])
-        if not search_items:
-            # Fallback search directly by location name
-            params["srsearch"] = f"{clean_loc} tourism landmarks"
-            resp2 = requests.get(WIKIPEDIA_API_URL, params=params, headers=DEFAULT_HEADERS, timeout=8)
-            if resp2.status_code == 200:
-                search_items = resp2.json().get("query", {}).get("search", [])
-
-        if not search_items:
-            return {
-                "status": "UNAVAILABLE",
-                "source": "Wikipedia",
-                "source_type": "UNAVAILABLE",
-                "location": location,
-                "places": [],
-                "reason": f"No Wikipedia entries found for '{location}'"
-            }
-
-        titles = [item["title"] for item in search_items[:limit]]
-        extracts_map = _fetch_wikipedia_extracts(titles)
-
-        places = []
-        for item in search_items:
-            t = item["title"]
-            info = extracts_map.get(t.lower())
-            if info and info.get("extract"):
-                places.append({
-                    "name": info["title"],
-                    "description": info["extract"],
-                    "url": info["url"],
-                    "source": "Wikipedia",
-                    "category": "Landmark / Attraction",
-                    "estimated_cost": None # No fabricated entry fees
-                })
-            else:
-                snippet = item.get("snippet", "").replace('<span class="searchmatch">', '').replace('</span>', '')
-                places.append({
-                    "name": t,
-                    "description": snippet,
-                    "url": f"https://en.wikipedia.org/wiki/{t.replace(' ', '_')}",
-                    "source": "Wikipedia",
-                    "category": "Landmark / Attraction",
-                    "estimated_cost": None
-                })
-            if len(places) >= limit:
-                break
-
-        return {
-            "status": "SUCCESS",
-            "source": "Wikipedia",
-            "source_type": "LIVE",
-            "location": location,
-            "places": places
-        }
-
-    except Exception as exc:
-        logger.error(f"Wikipedia search error for places in {location}: {exc}")
-        return {
-            "status": "UNAVAILABLE",
-            "source": "Wikipedia",
-            "source_type": "UNAVAILABLE",
-            "location": location,
-            "places": [],
-            "reason": str(exc)
+            "reason": "Wikipedia research unavailable; no unverified search results were substituted",
         }
 
 
-def search_wikipedia_food(
-    location: str,
-    query: Optional[str] = None,
-    preferences: Optional[List[str]] = None,
-    limit: int = 4
-) -> Dict[str, Any]:
-    """
-    Searches Wikipedia/MediaWiki for factual local cuisine and dishes in a destination.
-    Returns dish/cuisine name, factual extract, and canonical URL.
-    Does NOT fabricate restaurant availability or prices.
-    """
-    clean_loc = location.strip()
-    if not clean_loc:
-        return {
-            "status": "UNAVAILABLE",
-            "source": "Wikipedia",
-            "source_type": "UNAVAILABLE",
-            "location": location,
-            "food_items": [],
-            "reason": "No location provided for food search"
-        }
+def search_wikipedia_places(location, query=None, interests=None, limit=16):
+    return _collect(location, "places", limit)
 
-    subquery = query.strip() if query else ""
-    if not subquery and preferences:
-        subquery = " ".join(preferences[:2])
 
-    search_term = (subquery if clean_loc.lower() in subquery.lower() else f"{clean_loc} {subquery}") if subquery else f"Cuisine of {clean_loc}"
-
-    params = {
-        "action": "query",
-        "list": "search",
-        "srsearch": search_term,
-        "srlimit": max(limit, 4),
-        "format": "json",
-        "utf8": 1
-    }
-
-    try:
-        response = requests.get(WIKIPEDIA_API_URL, params=params, headers=DEFAULT_HEADERS, timeout=8)
-        if response.status_code != 200:
-            return {
-                "status": "UNAVAILABLE",
-                "source": "Wikipedia",
-                "source_type": "UNAVAILABLE",
-                "location": location,
-                "food_items": [],
-                "reason": f"MediaWiki returned HTTP {response.status_code}"
-            }
-
-        data = response.json()
-        search_items = data.get("query", {}).get("search", [])
-        if not search_items:
-            params["srsearch"] = f"{clean_loc} traditional dishes food"
-            resp2 = requests.get(WIKIPEDIA_API_URL, params=params, headers=DEFAULT_HEADERS, timeout=8)
-            if resp2.status_code == 200:
-                search_items = resp2.json().get("query", {}).get("search", [])
-
-        if not search_items:
-            return {
-                "status": "UNAVAILABLE",
-                "source": "Wikipedia",
-                "source_type": "UNAVAILABLE",
-                "location": location,
-                "food_items": [],
-                "reason": f"No culinary Wikipedia entries found for '{location}'"
-            }
-
-        titles = [item["title"] for item in search_items[:limit]]
-        extracts_map = _fetch_wikipedia_extracts(titles)
-
-        food_items = []
-        for item in search_items:
-            t = item["title"]
-            info = extracts_map.get(t.lower())
-            if info and info.get("extract"):
-                food_items.append({
-                    "name": info["title"],
-                    "description": info["extract"],
-                    "url": info["url"],
-                    "source": "Wikipedia",
-                    "category": "Local Cuisine",
-                    "estimated_cost": None # No fabricated meal prices
-                })
-            else:
-                snippet = item.get("snippet", "").replace('<span class="searchmatch">', '').replace('</span>', '')
-                food_items.append({
-                    "name": t,
-                    "description": snippet,
-                    "url": f"https://en.wikipedia.org/wiki/{t.replace(' ', '_')}",
-                    "source": "Wikipedia",
-                    "category": "Local Cuisine",
-                    "estimated_cost": None
-                })
-            if len(food_items) >= limit:
-                break
-
-        return {
-            "status": "SUCCESS",
-            "source": "Wikipedia",
-            "source_type": "LIVE",
-            "location": location,
-            "food_items": food_items
-        }
-
-    except Exception as exc:
-        logger.error(f"Wikipedia search error for food in {location}: {exc}")
-        return {
-            "status": "UNAVAILABLE",
-            "source": "Wikipedia",
-            "source_type": "UNAVAILABLE",
-            "location": location,
-            "food_items": [],
-            "reason": str(exc)
-        }
+def search_wikipedia_food(location, query=None, preferences=None, limit=12):
+    return _collect(location, "food", limit)

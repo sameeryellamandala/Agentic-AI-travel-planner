@@ -1,257 +1,1010 @@
-import React, { useState } from 'react';
-import axios from 'axios';
-import { 
-  Plane, Calendar, MapPin, Wallet, 
-  Map, Activity, Navigation, Loader2, Sparkles, AlertCircle
-} from 'lucide-react';
-import './index.css';
+import { useEffect, useState } from "react";
+import {
+  ArrowUpRight,
+  ArrowRight,
+  Compass,
+  MapPin,
+  CalendarDays,
+  Users,
+  Plane,
+  TrainFront,
+  Check,
+  LoaderCircle,
+  Sun,
+  AlertCircle,
+  Wallet,
+  Download,
+  ArrowLeft,
+  Leaf,
+  Utensils,
+  Landmark,
+  Mountain,
+  Waves,
+  ShoppingBag,
+} from "lucide-react";
+import "./index.css";
 
-function App() {
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState(null);
-  
-  // Form State
-  const [formData, setFormData] = useState({
-    source_city: 'Mumbai',
-    destination: 'Tokyo',
-    start_date: '2026-10-10',
-    end_date: '2026-10-13',
-    budget: '200000 INR',
-    train_class: '3A',
-    rail_distance_km: '',
-    passengers: 1,
-    random_seed: 0,
-    transport_mode: 'Flight',
-    hotel_type: '4-star',
-    interests: ['Food', 'Culture']
+const interests = [
+  [Utensils, "Food"],
+  [Landmark, "Culture"],
+  [Leaf, "Nature"],
+  [Mountain, "Adventure"],
+  [Waves, "Beaches"],
+  [ShoppingBag, "Shopping"],
+];
+const stages = [
+  "Checking your trip details",
+  "Finding places, stays & travel options",
+  "Putting your itinerary together",
+  "Checking your costs",
+  "Reviewing your journey",
+];
+const nextStage = {
+  prepare_trip: 1,
+  research_trip: 2,
+  create_itinerary: 3,
+  validate_and_price: 4,
+  review_itinerary: 2,
+};
+const money = (value) =>
+  new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    maximumFractionDigits: 0,
+  }).format(value);
+const localDate = (offset) => {
+  const d = new Date();
+  d.setDate(d.getDate() + offset);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+const niceDate = (value) =>
+  new Date(`${value}T12:00:00`).toLocaleDateString("en-IN", {
+    day: "numeric",
+    month: "short",
   });
+function safeLink(url) {
+  try {
+    const parsed = new URL(url);
+    return ["https:", "http:"].includes(parsed.protocol)
+      ? parsed.href
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
-  const handleChange = (e) => {
-    const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
-  };
+export default function App() {
+  const [form, setForm] = useState({
+    source_city: "Bengaluru",
+    destination: "Goa",
+    start_date: localDate(2),
+    end_date: localDate(4),
+    budget: 30000,
+    passengers: 2,
+    rooms: 1,
+    food_allowance: 600,
+    activity_allowance: 300,
+    hotel_allowance: 2500,
+    transport_mode: "Flight",
+    hotel_type: "Budget",
+    train_class: "3A",
+    rail_distance_km: "",
+    interests: ["Food", "Culture", "Beaches"],
+  });
+  const [loading, setLoading] = useState(false);
+  const [stage, setStage] = useState(0);
+  const [revision, setRevision] = useState(0);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState("");
+  const [tab, setTab] = useState("Itinerary");
+  const [photo, setPhoto] = useState(null);
+  useEffect(() => {
+    if ((loading || result || error) && window.innerWidth <= 800) {
+      document
+        .getElementById("journey-area")
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [loading, result, error]);
+  const update = (e) =>
+    setForm((previous) => ({ ...previous, [e.target.name]: e.target.value }));
+  const toggle = (value) =>
+    setForm((previous) => ({
+      ...previous,
+      interests: previous.interests.includes(value)
+        ? previous.interests.filter((x) => x !== value)
+        : [...previous.interests, value],
+    }));
+  const days =
+    Math.round(
+      (new Date(form.end_date) - new Date(form.start_date)) / 86400000,
+    ) + 1;
 
-  const handleInterestToggle = (interest) => {
-    setFormData(prev => {
-      const interests = prev.interests.includes(interest)
-        ? prev.interests.filter(i => i !== interest)
-        : [...prev.interests, interest];
-      return { ...prev, interests };
-    });
-  };
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  async function submit(event) {
+    event.preventDefault();
+    if (days < 1 || days > 30) {
+      setError("Choose a trip between 1 and 30 days.");
+      return;
+    }
     setLoading(true);
-    setError(null);
+    setError("");
+    setResult(null);
+    setStage(0);
+    setRevision(0);
+    setTab("Itinerary");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30 * 60 * 1000);
     try {
-      const response = await axios.post('http://localhost:8080/api/plan', {
-        ...formData,
-        rail_distance_km: formData.transport_mode === 'Train' ? Number(formData.rail_distance_km) : null,
+      const response = await fetch("/api/plan/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          ...form,
+          passengers: Number(form.passengers),
+          budget: Number(form.budget),
+          rail_distance_km:
+            form.transport_mode === "Train"
+              ? Number(form.rail_distance_km)
+              : null,
+        }),
       });
-      setResult(response.data.data);
+      if (!response.ok) {
+        const body = await response.json();
+        throw new Error(
+          Array.isArray(body.detail)
+            ? body.detail.map((x) => x.msg).join(". ")
+            : body.detail || "Unable to start planning.",
+        );
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let received = false;
+      function handle(line) {
+        if (!line.trim()) return;
+        const message = JSON.parse(line);
+        if (message.type === "error") throw new Error(message.message);
+        if (message.type === "stage") {
+          setStage(nextStage[message.completed] ?? 0);
+          if (message.revision_count != null)
+            setRevision(message.revision_count);
+        }
+        if (message.type === "result") {
+          setResult(message.data);
+          received = true;
+        }
+      }
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value, { stream: !done });
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+        lines.forEach(handle);
+        if (done) break;
+      }
+      handle(buffer);
+      if (!received)
+        throw new Error(
+          "The connection ended before the plan was ready. Please try again.",
+        );
     } catch (err) {
-      setError(err.response?.data?.detail || 'An error occurred while planning your trip.');
+      setError(
+        err.name === "AbortError"
+          ? "Planning took too long. Please try a shorter trip."
+          : err.message ||
+              "Cannot reach the planner. Check that the backend is running.",
+      );
     } finally {
+      clearTimeout(timeout);
       setLoading(false);
     }
-  };
+  }
 
-  const allInterests = ["Food", "Adventure", "Culture", "Shopping", "Nature", "Nightlife"];
+  function download() {
+    const url = URL.createObjectURL(
+      new Blob([JSON.stringify(result, null, 2)], { type: "application/json" }),
+    );
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${result.metadata.destination}-itinerary.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
 
   return (
-    <div className="app-container">
-      <main className="main-content">
-        
-        {/* Sidebar / Form */}
-        <aside className="glass-card" style={{ alignSelf: 'start', position: 'sticky', top: '2rem' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '2rem' }}>
-            <div style={{ background: 'var(--accent-gradient)', padding: '0.5rem', borderRadius: '12px' }}>
-              <Plane color="white" size={24} />
+    <div className="shell">
+      <header className="topbar">
+        <a className="brand" href="/" aria-label="Voyage home">
+          <span className="brand-mark">
+            <Compass size={23} />
+          </span>
+          voyage<span className="brand-dot">.</span>
+        </a>
+        <span className="header-note">
+          A little less planning. A lot more exploring.
+        </span>
+        <a className="header-link" href="#trip-form">
+          Plan a journey <ArrowUpRight size={16} />
+        </a>
+      </header>
+      <main>
+        <section className="intro">
+          <div>
+            <div className="eyebrow">
+              <span /> YOUR NEXT CHAPTER STARTS HERE
             </div>
-            <h2 style={{ fontSize: '1.5rem', margin: 0 }}>Voyage<span className="gradient-text">AI</span></h2>
+            <h1>
+              Go somewhere.
+              <br />
+              <em>Feel something.</em>
+            </h1>
+            <p>
+              Tell us what your perfect escape looks like.
+              <br />
+              We’ll bring the details together, one day at a time.
+            </p>
           </div>
-          
-          <form onSubmit={handleSubmit}>
-            <div className="form-group">
-              <label className="form-label"><MapPin size={14} style={{ display: 'inline', marginRight: '4px' }}/> Origin</label>
-              <input type="text" name="source_city" value={formData.source_city} onChange={handleChange} className="form-input" required />
+          <div className="intro-aside">
+            <span className="orbit">
+              <Compass size={60} strokeWidth={1} />
+            </span>
+            <span>
+              Thoughtfully planned.
+              <br />
+              Made for you.
+            </span>
+          </div>
+        </section>
+        <div className="workspace">
+          <aside className="planner" id="trip-form">
+            <div className="section-heading">
+              <span className="eyebrow">THE STARTING POINT</span>
+              <span className="tiny-tag">Your trip, your way</span>
             </div>
-            
-            <div className="form-group">
-              <label className="form-label"><Navigation size={14} style={{ display: 'inline', marginRight: '4px' }}/> Destination</label>
-              <input type="text" name="destination" value={formData.destination} onChange={handleChange} className="form-input" required />
-            </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-              <div className="form-group">
-                <label className="form-label"><Calendar size={14} style={{ display: 'inline', marginRight: '4px' }}/> Start</label>
-                <input type="date" name="start_date" value={formData.start_date} onChange={handleChange} className="form-input" required />
-              </div>
-              <div className="form-group">
-                <label className="form-label"><Calendar size={14} style={{ display: 'inline', marginRight: '4px' }}/> End</label>
-                <input type="date" name="end_date" value={formData.end_date} onChange={handleChange} className="form-input" required />
-              </div>
-            </div>
-
-            <div className="form-group">
-              <label className="form-label"><Wallet size={14} style={{ display: 'inline', marginRight: '4px' }}/> Target Budget</label>
-              <input type="text" name="budget" value={formData.budget} onChange={handleChange} className="form-input" required />
-            </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-              <div className="form-group">
-                <label className="form-label">Transport</label>
-                <select name="transport_mode" value={formData.transport_mode} onChange={handleChange} className="form-select">
-                  <option value="Flight">Flight</option>
-                  <option value="Train">Train</option>
-                </select>
-              </div>
-              <div className="form-group">
-                <label className="form-label">Hotel Class</label>
-                <select name="hotel_type" value={formData.hotel_type} onChange={handleChange} className="form-select">
-                  <option value="Budget">Budget</option>
-                  <option value="3-star">3-star</option>
-                  <option value="4-star">4-star</option>
-                  <option value="5-star">5-star</option>
-                </select>
-              </div>
-            </div>
-
-            {formData.transport_mode === 'Train' && <div className="form-group">
-              <label className="form-label" htmlFor="rail-distance">Source to destination railway distance (km)</label>
-              <input id="rail-distance" className="form-input" type="number" name="rail_distance_km" min="0.01" step="any" value={formData.rail_distance_km} onChange={handleChange} placeholder="Enter one-way distance in km" required />
-              <p>This one-way distance is used for each outbound and return leg. All four classes show configured fare estimates.</p>
-              <label>Train class for budget</label><select name="train_class" value={formData.train_class} onChange={handleChange}>{['SL','3A','2A','1A'].map(code => <option key={code}>{code}</option>)}</select>
-            </div>}
-            <div className="form-group"><label>Travelers</label><input type="number" min="1" name="passengers" value={formData.passengers} onChange={handleChange}/><label>Selection seed</label><input type="number" name="random_seed" value={formData.random_seed} onChange={handleChange}/></div>
-            <div className="form-group">
-              <label className="form-label">Interests</label>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                {allInterests.map(interest => (
-                  <button
-                    key={interest}
-                    type="button"
-                    onClick={() => handleInterestToggle(interest)}
-                    style={{
-                      background: formData.interests.includes(interest) ? 'var(--accent-primary)' : 'var(--bg-secondary)',
-                      color: formData.interests.includes(interest) ? 'white' : 'var(--text-secondary)',
-                      border: `1px solid ${formData.interests.includes(interest) ? 'var(--accent-primary)' : 'var(--border-color)'}`,
-                      padding: '0.3rem 0.75rem',
-                      borderRadius: '99px',
-                      fontSize: '0.8rem',
-                      cursor: 'pointer',
-                      transition: 'all 0.2s'
-                    }}
+            <h2>Make room for a getaway.</h2>
+            <form onSubmit={submit}>
+              <fieldset disabled={loading}>
+                <div className="route-fields">
+                  <Field label="Where from?" icon={MapPin}>
+                    <input
+                      name="source_city"
+                      value={form.source_city}
+                      onChange={update}
+                      required
+                      maxLength={100}
+                      autoComplete="address-level2"
+                    />
+                  </Field>
+                  <span className="route-connector">↓</span>
+                  <Field label="Where to?" icon={Compass}>
+                    <input
+                      name="destination"
+                      value={form.destination}
+                      onChange={update}
+                      required
+                      maxLength={100}
+                    />
+                  </Field>
+                </div>
+                <div className="two-cols">
+                  <Field label="Departure" icon={CalendarDays}>
+                    <input
+                      name="start_date"
+                      type="date"
+                      value={form.start_date}
+                      onChange={update}
+                      required
+                    />
+                  </Field>
+                  <Field label="Return" icon={CalendarDays}>
+                    <input
+                      name="end_date"
+                      type="date"
+                      min={form.start_date}
+                      value={form.end_date}
+                      onChange={update}
+                      required
+                    />
+                  </Field>
+                </div>
+                <div className="two-cols">
+                  <Field label="Trip budget · INR" icon={Wallet}>
+                    <input
+                      name="budget"
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={form.budget}
+                      onChange={update}
+                      required
+                    />
+                  </Field>
+                  <Field label="Travelers" icon={Users}>
+                    <input
+                      name="passengers"
+                      type="number"
+                      min="1"
+                      max="100"
+                      value={form.passengers}
+                      onChange={update}
+                      required
+                    />
+                  </Field>
+                </div>
+                <span className="field-label">How are you getting there?</span>
+                <div className="segmented">
+                  {[
+                    [Plane, "Flight"],
+                    [TrainFront, "Train"],
+                  ].map(([Icon, mode]) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      aria-pressed={form.transport_mode === mode}
+                      className={form.transport_mode === mode ? "selected" : ""}
+                      onClick={() => setForm({ ...form, transport_mode: mode })}
+                    >
+                      <Icon size={16} />
+                      {mode}
+                      {form.transport_mode === mode && <Check size={14} />}
+                    </button>
+                  ))}
+                </div>
+                {form.transport_mode === "Train" && (
+                  <div className="train-fields">
+                    <Field label="One-way railway distance · km">
+                      <input
+                        name="rail_distance_km"
+                        type="number"
+                        min="0.01"
+                        step="any"
+                        value={form.rail_distance_km}
+                        onChange={update}
+                        required
+                      />
+                    </Field>
+                    <Field label="Train class">
+                      <select
+                        name="train_class"
+                        value={form.train_class}
+                        onChange={update}
+                      >
+                        {["SL", "3A", "2A", "1A"].map((x) => (
+                          <option key={x}>{x}</option>
+                        ))}
+                      </select>
+                    </Field>
+                    <p className="helper">
+                      Used for outward and return fare estimates. These are not
+                      live ticket quotes.
+                    </p>
+                  </div>
+                )}
+                <Field label="Your stay style">
+                  <select
+                    name="hotel_type"
+                    value={form.hotel_type}
+                    onChange={update}
                   >
-                    {interest}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <button type="submit" className="btn-primary" disabled={loading} style={{ marginTop: '1.5rem' }}>
-              {loading ? <Loader2 className="spinner" size={18} /> : <Sparkles size={18} />}
-              {loading ? 'Formulating Journey...' : 'Plan My Journey'}
-            </button>
-          </form>
-        </aside>
-
-        {/* Main Content Area */}
-        <section>
-          {!result && !loading && !error && (
-            <div className="hero">
-              <h1>AI Travel <span className="gradient-text">Intelligence</span></h1>
-              <p>Your enterprise-grade AI travel concierge. Fill in the details on the left to generate a professional travel blueprint utilizing live data.</p>
-              
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1.5rem', marginTop: '4rem', textAlign: 'left' }}>
-                <div className="card">
-                  <Activity size={32} color="var(--accent-primary)" style={{ marginBottom: '1rem' }}/>
-                  <h3 style={{ marginBottom: '0.5rem' }}>Live Data Agents</h3>
-                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Real-time flight and hotel data fetched instantly for accurate planning.</p>
+                    <option value="Budget">Simple & comfortable</option>
+                    <option value="3-star">
+                      A little extra comfort · 3 star
+                    </option>
+                    <option value="4-star">Something special · 4 star</option>
+                    <option value="5-star">A touch of luxury · 5 star</option>
+                  </select>
+                </Field>
+                <details className="allowance-settings">
+                  <summary>
+                    Spending allowances <span>Adjust estimates</span>
+                  </summary>
+                  <p className="helper">
+                    Your planning amounts, not quoted prices. Applied when live
+                    costs are missing.
+                  </p>
+                  <Field label="Food · INR per person per day">
+                    <input
+                      type="number"
+                      min="0"
+                      name="food_allowance"
+                      value={form.food_allowance}
+                      onChange={update}
+                    />
+                  </Field>
+                  <Field label="Activities · INR per person per day">
+                    <input
+                      type="number"
+                      min="0"
+                      name="activity_allowance"
+                      value={form.activity_allowance}
+                      onChange={update}
+                    />
+                  </Field>
+                  <Field label="Hotel · INR per room per night">
+                    <input
+                      type="number"
+                      min="0"
+                      name="hotel_allowance"
+                      value={form.hotel_allowance}
+                      onChange={update}
+                    />
+                  </Field>
+                  <Field label="Rooms">
+                    <input
+                      type="number"
+                      min="1"
+                      max="100"
+                      name="rooms"
+                      value={form.rooms}
+                      onChange={update}
+                    />
+                  </Field>
+                </details>
+                <span className="field-label">What brings you joy?</span>
+                <div className="interest-chips">
+                  {interests.map(([Icon, name]) => (
+                    <button
+                      type="button"
+                      key={name}
+                      aria-pressed={form.interests.includes(name)}
+                      className={form.interests.includes(name) ? "active" : ""}
+                      onClick={() => toggle(name)}
+                    >
+                      <Icon size={14} />
+                      {name}
+                    </button>
+                  ))}
                 </div>
-                <div className="card">
-                  <Map size={32} color="var(--accent-primary)" style={{ marginBottom: '1rem' }}/>
-                  <h3 style={{ marginBottom: '0.5rem' }}>Smart Routing</h3>
-                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Optimized itineraries based strictly on your selected interests.</p>
-                </div>
-                <div className="card">
-                  <Wallet size={32} color="var(--accent-primary)" style={{ marginBottom: '1rem' }}/>
-                  <h3 style={{ marginBottom: '0.5rem' }}>Budget Engine</h3>
-                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Known costs are summed in Python; missing prices remain unavailable.</p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {loading && (
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', minHeight: '400px' }}>
-              <Loader2 className="spinner" size={48} color="var(--accent-primary)" style={{ marginBottom: '1.5rem' }} />
-              <h3 className="gradient-text">Analyzing routes and fetching live data...</h3>
-            </div>
-          )}
-
-          {error && (
-            <div className="card" style={{ borderColor: 'var(--danger)', backgroundColor: 'rgba(239,68,68,0.05)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--danger)', marginBottom: '1rem' }}>
-                <AlertCircle size={24} />
-                <h2>Error</h2>
-              </div>
-              <p>{error}</p>
-            </div>
-          )}
-
-          {result && !loading && (
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '2rem' }}>
+                <button type="submit" className="primary">
+                  {loading ? (
+                    <>
+                      <LoaderCircle className="spin" size={18} /> Planning your
+                      escape
+                    </>
+                  ) : (
+                    <>
+                      Start planning <ArrowRight size={18} />
+                    </>
+                  )}
+                </button>
+                <p className="form-footnote">
+                  {days > 0 && days <= 30
+                    ? `${days} days of possibility`
+                    : "Choose your travel dates"}{" "}
+                  <span>·</span> No bookings made
+                </p>
+              </fieldset>
+            </form>
+          </aside>
+          <section
+            className="journey-area"
+            id="journey-area"
+            aria-live="polite"
+            aria-busy={loading}
+          >
+            {error && (
+              <div className="notice error" role="alert">
+                <AlertCircle size={20} />
                 <div>
-                  <h1 style={{ fontSize: '2.5rem', marginBottom: '0.5rem' }}>Journey to {formData.destination}</h1>
-                  {result.weather?.condition && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-secondary)' }}>
-                      <span className="badge badge-success">LIVE WEATHER</span>
-                      <span>{result.weather.temperature}°C, {result.weather.condition}</span>
+                  <strong>We hit a little detour.</strong>
+                  <p>{error}</p>
+                </div>
+              </div>
+            )}
+            {loading ? (
+              <div className="progress-panel">
+                <span className="eyebrow">GOOD THINGS TAKE A MOMENT</span>
+                <Compass className="slow-spin" size={64} strokeWidth={1} />
+                <h2>Your next story is taking shape.</h2>
+                <p>
+                  We’re researching your trip, arranging the days,
+                  <br />
+                  and giving the details a second look.
+                </p>
+                <ol className="progress-list">
+                  {stages.map((label, i) => (
+                    <li
+                      key={label}
+                      className={
+                        stage === i ? "current" : stage > i ? "done" : ""
+                      }
+                    >
+                      <span>
+                        {stage > i ? (
+                          <Check size={14} />
+                        ) : stage === i ? (
+                          <LoaderCircle size={14} className="spin" />
+                        ) : (
+                          i + 1
+                        )}
+                      </span>
+                      {label}
+                    </li>
+                  ))}
+                </ol>
+                {revision > 0 && (
+                  <p className="helper">
+                    Refining your itinerary · revision {revision} of 2
+                  </p>
+                )}
+                <p className="helper">
+                  Longer trips can take several minutes. Keep this page open.
+                </p>
+              </div>
+            ) : result ? (
+              <>
+                <div className="result-heading">
+                  <div>
+                    <span className="eyebrow">YOUR JOURNEY, ON PAPER</span>
+                    <h2>
+                      A little time in <em>{result.metadata.destination}.</em>
+                    </h2>
+                    <p>
+                      {niceDate(result.metadata.start_date)} —{" "}
+                      {niceDate(result.metadata.end_date)} ·{" "}
+                      {result.metadata.total_days} days ·{" "}
+                      {result.metadata.passengers} travelers
+                    </p>
+                  </div>
+                  <button
+                    className="icon-button"
+                    onClick={download}
+                    aria-label="Download itinerary"
+                  >
+                    <Download size={19} />
+                  </button>
+                </div>
+                <div className="result-summary">
+                  <span
+                    className={`status ${result.metadata.planning_status === "FAILED" ? "failed" : ""}`}
+                  >
+                    {result.metadata.planning_status === "FAILED"
+                      ? "Planning incomplete"
+                      : result.metadata.planning_status === "PARTIAL"
+                        ? "Itinerary & planning estimate"
+                        : "Ready to explore"}
+                  </span>
+                  <span>
+                    {result.metadata.review_status === "APPROVED"
+                      ? "✓ Itinerary reviewed"
+                      : "Review needs attention"}
+                  </span>
+                </div>
+                {result.warnings.length > 0 && (
+                  <details className="notice">
+                    <summary>
+                      <AlertCircle size={16} /> A few things to know (
+                      {result.warnings.length})
+                    </summary>
+                    <ul>
+                      {result.warnings.map((warning, i) => (
+                        <li key={i}>{warning}</li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+                {result.metadata.guide_mode === "SOURCE_GUIDE" && (
+                  <p className="source-guide-note">
+                    This guide uses verified destination sources. AI wording was
+                    unavailable or could not be verified.
+                  </p>
+                )}
+                <div className="tabs" role="tablist" aria-label="Trip details">
+                  {["Itinerary", "Travel & stays", "Budget"].map((name) => (
+                    <button
+                      role="tab"
+                      aria-selected={tab === name}
+                      key={name}
+                      onClick={() => setTab(name)}
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+                <div role="tabpanel" aria-label={tab}>
+                  {tab === "Itinerary" ? (
+                    <div className="days">
+                      {result.days.map((day) => (
+                        <DayCard key={day.day} day={day} />
+                      ))}
                     </div>
+                  ) : tab === "Budget" ? (
+                    <Budget budget={result.budget} />
+                  ) : (
+                    <Travel result={result} />
                   )}
                 </div>
-                <div style={{ textAlign: 'right' }}>
-                  <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>Known subtotal</div>
-                  <div style={{ fontSize: '2rem', fontWeight: 'bold', color: 'var(--success)' }}>{result.budget.entries.some(entry => entry.amount !== null) ? `INR ${result.budget.known_subtotal.toLocaleString()}` : 'Unavailable'} ({result.budget.status})</div>
+                <details className="activity">
+                  <summary>Planning activity & review</summary>
+                  <ol>
+                    {result.agent_activity.map((item, i) => (
+                      <li key={i}>{item}</li>
+                    ))}
+                  </ol>
+                  {result.review?.issues?.map((issue, i) => (
+                    <p key={i}>
+                      {issue.problem} — {issue.suggested_fix}
+                    </p>
+                  ))}
+                </details>
+                <button
+                  className="text-button"
+                  onClick={() => {
+                    setResult(null);
+                    document
+                      .getElementById("trip-form")
+                      .scrollIntoView({ behavior: "smooth" });
+                  }}
+                >
+                  <ArrowLeft size={15} /> Plan another escape
+                </button>
+              </>
+            ) : (
+              <>
+                <DestinationPhoto onPhoto={setPhoto} photo={photo} />
+                <div className="empty-copy">
+                  <span className="eyebrow">
+                    LESS RESEARCH. MORE DAYDREAMING.
+                  </span>
+                  <h2>
+                    The best trips start
+                    <br />
+                    with a little curiosity.
+                  </h2>
+                  <p>
+                    A seaside morning. A tucked-away café. A place you’ve
+                    <br className="desktop-break" /> always wanted to see. Let’s
+                    find your kind of journey.
+                  </p>
                 </div>
-              </div>
-
-              {result.warnings && result.warnings.length > 0 && (
-                <div style={{ background: 'rgba(245,158,11,0.1)', border: '1px solid var(--warning)', padding: '1rem', borderRadius: '8px', marginBottom: '2rem', color: '#FCD34D' }}>
-                  {result.warnings.map((w, i) => <div key={i}>⚠️ {w}</div>)}
+                <div className="benefits">
+                  <div>
+                    <MapPin size={20} />
+                    <h3>Places with a story</h3>
+                    <p>
+                      Ideas shaped around
+                      <br />
+                      what you love.
+                    </p>
+                  </div>
+                  <div>
+                    <CalendarDays size={20} />
+                    <h3>Days that flow</h3>
+                    <p>
+                      A thoughtful plan,
+                      <br />
+                      with places, food & local stories.
+                    </p>
+                  </div>
+                  <div>
+                    <Wallet size={20} />
+                    <h3>Costs made clearer</h3>
+                    <p>
+                      See known prices
+                      <br />
+                      and what’s still missing.
+                    </p>
+                  </div>
                 </div>
-              )}
-
-              {result.metadata.planning_status === 'FAILED' && <p role="alert">No itinerary was generated. Check the model/API warnings.</p>}
-              {result.metadata.planning_status === 'PARTIAL' && <p role="status">This itinerary is incomplete.</p>}
-              <Tabs result={result} formData={formData} />
-            </div>
-          )}
-        </section>
+                <div className="editorial-note">
+                  <span>01 /</span>
+                  <p>
+                    Go for the places.
+                    <br />
+                    <em>Stay for the feeling.</em>
+                  </p>
+                  <Compass size={35} strokeWidth={1} />
+                </div>
+              </>
+            )}
+          </section>
+        </div>
+        <footer>
+          <span>
+            voyage.{" "}
+            <span className="muted">Made for the moments in between.</span>
+          </span>
+          <span>
+            Explore thoughtfully <ArrowUpRight size={13} />
+          </span>
+        </footer>
       </main>
     </div>
   );
 }
 
-function Tabs({ result }) {
-  return <div>
-    {result.days.map(day => <article className="card" key={day.day} style={{marginBottom: '1rem'}}>
-      <h2>Day {day.day} · {day.date} · {day.location}</h2>
-      <p>{day.weather?.success ? `${day.weather.temperature}°C · ${day.weather.condition ?? 'condition unavailable'}` : 'Weather unavailable'}</p>
-      {['morning','afternoon','evening','places','food','temples'].map(key => <section key={key}>
-        <h3>{key}</h3><ul>{day[key].map(item => <li key={item.candidate_id}><a href={item.url} target="_blank" rel="noreferrer">{item.name}</a><p>{item.description}</p></li>)}</ul>
-      </section>)}
-      {day.warnings.map((warning,i)=><p key={i}>{warning}</p>)}
-    </article>)}
-    <h2>Transport</h2>{result.transport.map(leg=><div className="card" key={leg.id}>{leg.origin} → {leg.destination} · {leg.departure_date}<p>{leg.result?.success ? `${leg.mode} · ${leg.result.price ?? 'Price unavailable'} ${leg.result.currency ?? ''} (${leg.result.source_type})` : leg.result?.reason ?? 'Not searched; unavailable'}</p>{leg.result?.fares && <><p>Reported railway distance: {leg.result.distance_km} km · {leg.result.distance?.source}</p><ul>{leg.result.fares.map(fare => <li key={fare.class}>{fare.name}: INR {fare.base_fare} + tax {fare.tax} = {fare.total_fare} per traveler · party total {fare.party_total} · CONFIGURED_ESTIMATE</li>)}</ul></>}</div>)}
-    <h2>Accommodation</h2>{result.accommodation.map(stay=><div className="card" key={stay.id}>{stay.location} · {stay.check_in} → {stay.check_out}<p>{stay.result?.name ?? stay.result?.reason ?? 'Unavailable'}</p><p>Total: {stay.result?.total_price ?? 'Unavailable'} {stay.result?.currency ?? ''}</p></div>)}
-    <h2>Budget: {result.budget.status}</h2><p>Known subtotal: {result.budget.entries.some(entry => entry.amount !== null) ? `INR ${result.budget.known_subtotal}` : 'Unavailable; no prices retrieved'}</p>
-    <ul>{result.budget.entries.map((entry,i)=><li key={i}>{entry.label}: {entry.amount ?? 'Unavailable'} · {entry.provenance}</li>)}</ul>
-    <details><summary>Tool trace and selection audit</summary><pre>{JSON.stringify({trace:result.tool_trace, randomization:result.randomization},null,2)}</pre></details>
-  </div>;
+function Field({ label, icon: Icon, children }) {
+  return (
+    <label className="field">
+      <span className="field-label">
+        {Icon && <Icon size={13} />} {label}
+      </span>
+      {children}
+    </label>
+  );
 }
-export default App;
+
+function DestinationPhoto({ photo, onPhoto }) {
+  // The optional photo endpoint keeps the provider key on the server.
+  useEffect(() => {
+    if (photo) return;
+    const controller = new AbortController();
+    fetch("/api/inspiration", { signal: controller.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data?.url) onPhoto(data);
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [photo, onPhoto]);
+  return (
+    <div
+      className={`destination-photo ${photo ? "has-photo" : ""}`}
+      style={
+        photo
+          ? {
+              backgroundImage: `linear-gradient(180deg, transparent 25%, rgba(13,40,33,.65)), url("${photo.url}")`,
+            }
+          : {}
+      }
+    >
+      <div className="photo-top">
+        <span>THE WORLD IS STILL FULL OF WONDER</span>
+        <ArrowUpRight size={21} />
+      </div>
+      <div className="landscape-art" aria-hidden="true">
+        <div className="sun-disc" />
+        <div className="hill hill-back" />
+        <div className="hill hill-front" />
+        <div className="sea-lines" />
+      </div>
+      <div className="photo-bottom">
+        <div>
+          <span className="photo-kicker">A CHANGE OF SCENERY</span>
+          <h2>
+            Somewhere
+            <br />
+            you’ll remember.
+          </h2>
+        </div>
+        <span className="photo-stamp">
+          <Compass size={27} />
+          <small>
+            TAKE THE
+            <br />
+            SCENIC ROUTE
+          </small>
+        </span>
+      </div>
+      {photo && (
+        <a
+          className="photo-credit"
+          href={safeLink(photo.photographer_url)}
+          target="_blank"
+          rel="noreferrer"
+        >
+          {photo.photographer} / Pexels
+        </a>
+      )}
+    </div>
+  );
+}
+
+function DayCard({ day }) {
+  const visits = day.activities?.length ? day.activities : day.places || [];
+  return (
+    <article className="day-card guide-card">
+      <header>
+        <span className="day-number">{String(day.day).padStart(2, "0")}</span>
+        <div>
+          <span className="eyebrow">
+            Day {day.day} · {niceDate(day.date)} · {day.location}
+          </span>
+          <h3>{day.title || `Discover ${day.location}`}</h3>
+        </div>
+        {day.weather?.success && (
+          <span className="weather">
+            <Sun size={15} />
+            {day.weather.temperature}°C
+          </span>
+        )}
+      </header>
+      {day.highlights && (
+        <div className="day-highlights">
+          <span className="eyebrow">TODAY’S HIGHLIGHTS</span>
+          <p>{day.highlights}</p>
+        </div>
+      )}
+      <div className="guide-visits">
+        <h4>
+          <MapPin size={16} /> Places to visit & things to do
+        </h4>
+        {visits.length ? (
+          visits.map((item, index) => (
+            <section className="guide-visit" key={item.candidate_id}>
+              <span className="visit-index">{index + 1}</span>
+              <div>
+                <h4>{item.name}</h4>
+                <p>{item.why_visit || item.description}</p>
+                {item.what_to_do && (
+                  <p className="visit-advice">
+                    <strong>What to do</strong> {item.what_to_do}
+                  </p>
+                )}
+                <a
+                  className="source-link"
+                  href={safeLink(item.url)}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Read about this place on Wikipedia <ArrowUpRight size={12} />
+                </a>
+              </div>
+            </section>
+          ))
+        ) : (
+          <p className="helper">
+            We couldn’t verify local attractions for this day. Try a more
+            specific destination.
+          </p>
+        )}
+      </div>
+      {day.food?.length > 0 && (
+        <div className="guide-food">
+          <h4>
+            <Utensils size={16} /> Foods to try
+          </h4>
+          {day.food.map((item) => (
+            <div className="food-suggestion" key={item.candidate_id}>
+              <a href={safeLink(item.url)} target="_blank" rel="noreferrer">
+                {item.name} <ArrowUpRight size={12} />
+              </a>
+              <p>{item.what_to_try || item.description}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </article>
+  );
+}
+
+function Travel({ result }) {
+  return (
+    <div className="travel-details">
+      <h3>The journey there & back</h3>
+      {result.transport.length ? (
+        result.transport.map((leg) => (
+          <article className="travel-card" key={leg.id}>
+            <Plane size={21} />
+            <div>
+              <h4>
+                {leg.origin} → {leg.destination}
+              </h4>
+              <p>
+                {niceDate(leg.departure_date)} · {leg.mode}
+              </p>
+              <p>
+                {leg.result?.success
+                  ? leg.result.price != null
+                    ? `${leg.result.currency} ${leg.result.price.toLocaleString("en-IN")} · ${leg.result.source_type === "CONFIGURED_ESTIMATE" ? "Configured estimate" : "Provider price"}`
+                    : "Price unavailable"
+                  : leg.result?.reason || "Travel information unavailable"}
+              </p>
+              {leg.result?.fares && (
+                <details>
+                  <summary>Compare train classes</summary>
+                  {leg.result.fares.map((fare) => (
+                    <p key={fare.class}>
+                      {fare.name}: {money(fare.party_total)} for your group
+                    </p>
+                  ))}
+                </details>
+              )}
+            </div>
+          </article>
+        ))
+      ) : (
+        <p>No intercity journey required.</p>
+      )}
+      <h3>A place to settle in</h3>
+      {result.accommodation.length ? (
+        result.accommodation.map((stay) => (
+          <article className="travel-card" key={stay.id}>
+            <MapPin size={21} />
+            <div>
+              <h4>{stay.result?.success ? stay.result.name : stay.location}</h4>
+              <p>
+                {niceDate(stay.check_in)} — {niceDate(stay.check_out)} ·{" "}
+                {stay.nights} nights
+              </p>
+              <p>
+                {stay.result?.success
+                  ? stay.result.total_price != null
+                    ? `${stay.result.currency} ${stay.result.total_price.toLocaleString("en-IN")} total`
+                    : "Stay total unavailable"
+                  : stay.result?.reason || "Accommodation unavailable"}
+              </p>
+              {stay.result?.provider_quote != null && (
+                <p>
+                  Vendor quote: {money(stay.result.provider_quote)} · nightly or
+                  full-stay basis unconfirmed; excluded from budget.
+                </p>
+              )}
+            </div>
+          </article>
+        ))
+      ) : (
+        <p>No overnight stay needed for this trip.</p>
+      )}
+    </div>
+  );
+}
+
+function Budget({ budget }) {
+  const priced = budget.entries.filter((entry) => entry.amount !== null);
+  const allowances = budget.planning_entries || [];
+  const planned = budget.planning_total ?? budget.known_subtotal;
+  const above = budget.user_budget > 0 && planned > budget.user_budget;
+  return (
+    <section className="budget-panel">
+      <span className="eyebrow">A PRACTICAL PLAN FOR YOUR SPENDING</span>
+      <h2>{money(planned)}</h2>
+      <p>Planning total · known costs plus your spending allowances</p>
+      <div className="budget-target">
+        <span>Your trip budget</span>
+        <strong>{money(budget.user_budget)}</strong>
+      </div>
+      <ul className="cost-list">
+        {[...priced, ...allowances].map((entry, i) => (
+          <li key={i}>
+            <span>
+              {entry.label}
+              <small>
+                {entry.provenance === "PLANNING_ALLOWANCE"
+                  ? "Planning allowance · not a live quote"
+                  : entry.provenance === "CONFIGURED_ESTIMATE"
+                    ? "Configured fare estimate"
+                    : "Provider price"}
+              </small>
+            </span>
+            <strong>{money(entry.amount)}</strong>
+          </li>
+        ))}
+      </ul>
+      <div className={`budget-balance ${above ? "above" : ""}`}>
+        <span>
+          {budget.user_budget <= 0
+            ? "No target budget set"
+            : above
+              ? "Above your planned budget"
+              : "Room left in your planned budget"}
+        </span>
+        {budget.user_budget > 0 && (
+          <strong>{money(Math.abs(budget.user_budget - planned))}</strong>
+        )}
+      </div>
+      <p className="helper">
+        Allowances cover the whole group and trip. You can change them in the
+        trip form. Hotel allowances are used only where a confirmed stay price
+        is missing.
+      </p>
+      <p className="budget-disclosure">
+        This is a planning estimate, not a booking quote. Actual prices may
+        vary.{" "}
+        {budget.unpriced_categories?.includes("transport")
+          ? "Transport without a price is excluded. "
+          : ""}
+        Wikipedia supports the place and food descriptions; it does not verify
+        current prices.
+      </p>
+      <details className="budget-evidence">
+        <summary>See confirmed costs and estimate details</summary>
+        <p>
+          Known subtotal: {money(budget.known_subtotal)}. Missing prices are
+          replaced by the labelled allowances above where configured. No hotel
+          is booked or guaranteed.
+        </p>
+      </details>
+    </section>
+  );
+}

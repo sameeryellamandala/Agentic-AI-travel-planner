@@ -1,42 +1,170 @@
-"""Live StayingAPI adapter; never uses a local accommodation inventory."""
+"""Makcorps city mapping and dated hotel quotes; never assume a quote's basis."""
+
 import os
-import requests
+import re
 from datetime import date
+from functools import lru_cache
+import requests
 from utils.budget import valid_amount
 
+BASE_URL = "https://api.makcorps.com"
 
-def search_stay_hotels(location, check_in='', check_out='', guests=1, hotel_type='Budget', max_price=None):
-    base = {'source': 'StayingAPI', 'location': location, 'check_in': check_in, 'check_out': check_out}
+
+@lru_cache(maxsize=128)
+def resolve_city(location, api_key):
+    response = requests.get(
+        BASE_URL + "/mapping", params={"api_key": api_key, "name": location}, timeout=20
+    )
+    response.raise_for_status()
+    rows = response.json()
+    if not isinstance(rows, list):
+        raise ValueError("Unexpected city mapping response")
+    matches = [
+        row for row in rows if row.get("type") == "GEO" and row.get("document_id")
+    ]
+    exact = [
+        row
+        for row in matches
+        if row.get("details", {}).get("name", "").casefold() == location.casefold()
+    ]
+    if len(exact) == 1:
+        return exact[0]["document_id"]
+    if len(matches) == 1:
+        return matches[0]["document_id"]
+    raise ValueError("City is ambiguous or unavailable; include country or region")
+
+
+def parse_inr(value):
+    if isinstance(value, str):
+        value = (
+            re.sub(r"^(?:INR\s*|₹\s*|Rs\.?\s*)", "", value.strip(), flags=re.I)
+            .replace(",", "")
+            .strip()
+        )
+        if not re.fullmatch(r"\d+(?:\.\d{1,2})?", value):
+            return None
+    amount = valid_amount(value)
+    return float(amount) if amount is not None and amount > 0 else None
+
+
+def search_stay_hotels(
+    location,
+    check_in="",
+    check_out="",
+    guests=1,
+    hotel_type="Budget",
+    max_price=None,
+    rooms=1,
+):
+    base = {
+        "source": "Makcorps",
+        "location": location,
+        "check_in": check_in,
+        "check_out": check_out,
+    }
+
     def unavailable(reason):
-        return {**base, 'success': False, 'status': 'UNAVAILABLE', 'source_type': 'UNAVAILABLE', 'hotels': [], 'reason': reason}
-    if os.getenv('STAYING_API_KEY', '').startswith(('stay_test_', 'stay_sandbox_')):
-        return unavailable('STAYING_API_KEY is a sandbox key; configure a stay_live_ key for real accommodation results')
-    if not os.getenv('STAYING_API_KEY'):
-        return unavailable('STAYING_API_KEY is not configured')
+        return {
+            **base,
+            "success": False,
+            "status": "UNAVAILABLE",
+            "source_type": "UNAVAILABLE",
+            "hotels": [],
+            "reason": reason,
+        }
+
+    key = os.getenv("MAKCORPS_API_KEY")
+    if not key:
+        return unavailable("MAKCORPS_API_KEY is not configured")
     try:
-        response = requests.get(os.getenv('STAY_SEARCH_URL', 'https://api.stayingapi.com/v1/search'),
-            params={'location': location, 'checkIn': check_in, 'checkOut': check_out, 'adults': guests, 'rooms': 1, 'currency': 'INR', 'limit': 10},
-            headers={'Authorization': 'Bearer ' + os.environ['STAYING_API_KEY']}, timeout=20)
+        nights = (date.fromisoformat(check_out) - date.fromisoformat(check_in)).days
+        if nights < 1 or type(guests) is not int or guests < 1:
+            return unavailable("Invalid stay dates or guest count")
+        cityid = resolve_city(location.strip(), key)
+        response = requests.get(
+            BASE_URL + "/city",
+            params={
+                "api_key": key,
+                "cityid": cityid,
+                "pagination": 0,
+                "cur": "INR",
+                "rooms": rooms,
+                "adults": guests,
+                "checkin": check_in,
+                "checkout": check_out,
+                "tax": "true",
+            },
+            timeout=45,
+        )
         if response.status_code != 200:
-            return unavailable(f'StayingAPI HTTP {response.status_code}')
-        data = response.json()
-        provider_warnings = data.get('meta', {}).get('warnings', [])
-        if any(isinstance(w, dict) and w.get('code') == 'sandbox_data' for w in provider_warnings):
-            return unavailable('StayingAPI returned sandbox fixtures rather than live accommodation; configure a live key')
+            return unavailable(
+                f"Makcorps hotel search returned HTTP {response.status_code}"
+            )
+        rows = response.json()
+        if not isinstance(rows, list):
+            return unavailable("Makcorps returned an unexpected hotel response")
         hotels = []
-        for row in data.get('data', []):
-            if not row.get('name'):
+        for row in rows:
+            if not isinstance(row, dict) or not row.get("name"):
                 continue
-            price = row.get('price') or {}
-            expected_nights = (date.fromisoformat(check_out)-date.fromisoformat(check_in)).days
-            total = price.get('totalPrice') if price.get('nights') in (None, expected_nights) else None
-            hotels.append({'id': row.get('id'), 'name': row['name'], 'url': row.get('url'),
-                'location': row.get('location'), 'rating': row.get('guestRating'), 'rating_scale': row.get('ratingScale'),
-                'price_per_night': price.get('nightlyPrice'), 'total_price': total,
-                'currency': price.get('currency'), 'source': 'StayingAPI', 'source_type': 'LIVE_PROVIDER'})
+            offers = [
+                {
+                    "vendor": row.get(f"vendor{i}"),
+                    "price": parse_inr(row.get(f"price{i}")),
+                }
+                for i in range(1, 5)
+            ]
+            offers = [offer for offer in offers if offer["price"] is not None]
+            quote = min((offer["price"] for offer in offers), default=None)
+            # The public city API documents vendor prices without a nightly/stay-total definition.
+            # Only an explicit provider total is safe to include in budget arithmetic.
+            total = (
+                parse_inr(row.get("total_price"))
+                if row.get("currency") == "INR"
+                else None
+            )
+            hotels.append(
+                {
+                    "id": row.get("hotelId"),
+                    "name": row["name"],
+                    "url": row.get("url"),
+                    "rating": (row.get("reviews") or {}).get("rating"),
+                    "currency": "INR",
+                    "provider_quote": quote,
+                    "price_basis": "UNSPECIFIED",
+                    "total_price": total,
+                    "price_per_night": None,
+                    "offers": offers,
+                    "source": "Makcorps",
+                    "source_type": "LIVE_PROVIDER",
+                }
+            )
         if not hotels:
-            return unavailable('No accommodation returned for requested period')
-        selected = min(hotels, key=lambda h: valid_amount(h['total_price']) if h['currency']=='INR' and valid_amount(h['total_price']) is not None else float('inf'))
-        return {**base, **selected, 'success': True, 'status': 'SUCCESS', 'hotels': hotels, 'warnings': data.get('meta', {}).get('warnings', [])}
+            return unavailable("No hotels returned for the requested city and dates")
+        selected = min(
+            hotels,
+            key=lambda hotel: (
+                hotel["provider_quote"]
+                if hotel["provider_quote"] is not None
+                else float("inf")
+            ),
+        )
+        warnings = [
+            "Makcorps vendor quotes have no confirmed nightly/stay-total basis; unconfirmed totals are excluded from the budget."
+        ]
+        if hotel_type != "Budget":
+            warnings.append(
+                "Requested hotel star class cannot be verified from the Makcorps city response; guest ratings are not star classifications."
+            )
+        return {
+            **base,
+            **selected,
+            "success": True,
+            "status": "SUCCESS",
+            "hotels": hotels[:10],
+            "warnings": warnings,
+        }
     except (requests.RequestException, ValueError, TypeError, KeyError):
-        return unavailable('StayingAPI request or response failed')
+        return unavailable(
+            "Makcorps request failed or the city could not be resolved uniquely"
+        )
